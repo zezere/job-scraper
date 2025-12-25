@@ -28,7 +28,7 @@ if __name__ == "__main__":
         )
 
         logger.info("Step 4: Processing jobs from preparedjobs...")
-        process_stats = process_jobs(batch_size=2)
+        process_stats = process_jobs(batch_size=3)
         logger.info(
             f"Processing completed: {process_stats['processed']} processed, {process_stats['errors']} errors"
         )

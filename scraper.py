@@ -1,3 +1,4 @@
+from typing import Dict, Any
 from jobspy import scrape_jobs
 from database import save_jobs
 from utils import setup_logging
@@ -5,15 +6,20 @@ from utils import setup_logging
 logger = setup_logging("scraper")
 
 
-def run_scraper():
+def run_scraper() -> None:
+    """
+    Scrapes jobs from LinkedIn using jobspy and saves them to the database.
+
+    Logs the entire process and handles errors.
+    """
     logger.info("=" * 60)
     logger.info("Starting job scraping process")
     logger.info("=" * 60)
 
-    search_params = {
+    search_params: Dict[str, Any] = {
         "site_name": "linkedin",
-        "search_term": "postgres",
-        "location": "Amsterdam, North Holland, Netherlands",
+        "search_term": "data analyst",
+        "location": "Luxembourg",
         "results_wanted": 30,
         "hours_old": 24,
         "verbose": 2,

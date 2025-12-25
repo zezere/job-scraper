@@ -1,7 +1,9 @@
 import logging
+from typing import Optional, Any
 import psycopg2
 import pandas as pd
 from config import DATABASE_URL
+from utils import get_value, validate_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +35,23 @@ TABLE_COLUMNS = [
 ]
 
 
-def save_jobs(jobs_df):
+def save_jobs(jobs_df: pd.DataFrame) -> None:
+    """
+    Saves jobs from a DataFrame to the jobsli table in the database.
+
+    Handles duplicate IDs by skipping existing records. Only saves columns
+    that exist in both the DataFrame and the table schema.
+
+    Args:
+        jobs_df: DataFrame containing job data with at least an 'id' column
+    """
     logger.info(f"save_jobs called with {len(jobs_df)} jobs to process")
 
     if jobs_df.empty:
         logger.warning("Received empty DataFrame, nothing to save")
         return
+
+    validate_dataframe(jobs_df, ["id"], save_jobs.__name__)
 
     try:
         logger.info("Establishing database connection...")
@@ -81,10 +94,6 @@ def save_jobs(jobs_df):
     """
 
     logger.debug(f"Insert query prepared with {len(available_columns)} columns")
-
-    def get_value(row, key):
-        val = row.get(key)
-        return val if pd.notna(val) else None
 
     try:
         logger.info("Starting to insert jobs into database...")

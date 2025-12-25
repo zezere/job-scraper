@@ -1,16 +1,21 @@
+from typing import Optional
 import streamlit as st
 import psycopg2
 import pandas as pd
 from config import DATABASE_URL
+from utils import validate_query_result
 
 
-def get_processed_jobs():
+def get_processed_jobs() -> Optional[pd.DataFrame]:
     """
     Fetches all jobs from processedjobs table.
 
     Returns:
         DataFrame with all processed jobs, or None if error
     """
+    conn = None
+    cursor = None
+
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -22,17 +27,28 @@ def get_processed_jobs():
 
         df = pd.DataFrame(rows, columns=column_names)
 
-        cursor.close()
-        conn.close()
+        if not df.empty:
+            validate_query_result(df, ["title"], get_processed_jobs.__name__)
 
         return df
 
     except Exception as e:
         st.error(f"Error fetching data from database: {e}")
         return None
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conn is not None:
+            conn.close()
 
 
-def main():
+def main() -> None:
+    """
+    Main Streamlit application entry point.
+
+    Displays a dashboard for viewing and filtering tech jobs in Europe.
+    Includes filters for is_remote, job_level, job_type, and job_function.
+    """
     st.set_page_config(page_title="Tech Jobs in Europe", page_icon="🇪🇺", layout="wide")
 
     st.markdown(

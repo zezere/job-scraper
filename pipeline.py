@@ -1,14 +1,16 @@
 import logging
 import os
+from typing import Dict, Any, Optional, Tuple
 import psycopg2
 import pandas as pd
 from datetime import datetime
 from config import DATABASE_URL
+from utils import get_value, validate_dataframe, validate_query_result
 
 logger = logging.getLogger(__name__)
 
 
-def extract_unique_jobs(export_duplicates_csv=True):
+def extract_unique_jobs(export_duplicates_csv: bool = True) -> pd.DataFrame:
     """
     Extracts jobs with unique 'id' values from jobsli table.
     For duplicate IDs, keeps the one with latest 'created_at' timestamp.
@@ -45,13 +47,7 @@ def extract_unique_jobs(export_duplicates_csv=True):
             logger.warning("No jobs found in database")
             return pd.DataFrame()
 
-        if "id" not in jobs_df.columns:
-            logger.error("'id' column not found in jobs table")
-            return pd.DataFrame()
-
-        if "created_at" not in jobs_df.columns:
-            logger.error("'created_at' column not found in jobs table")
-            return pd.DataFrame()
+        validate_dataframe(jobs_df, ["id", "created_at"], extract_unique_jobs.__name__)
 
         logger.info("Analyzing duplicates by 'id' field...")
         id_counts = jobs_df["id"].value_counts()
@@ -128,7 +124,9 @@ def extract_unique_jobs(export_duplicates_csv=True):
         logger.info("Database connection closed")
 
 
-def move_to_prepared_jobs(unique_jobs_df, export_failed_csv=True):
+def move_to_prepared_jobs(
+    unique_jobs_df: pd.DataFrame, export_failed_csv: bool = True
+) -> Dict[str, int]:
     """
     Moves unique jobs from DataFrame to preparedjobs table.
     Checks for existing records by comparing all columns except id_primary, created_at, and prepared_at.
@@ -148,6 +146,8 @@ def move_to_prepared_jobs(unique_jobs_df, export_failed_csv=True):
     if unique_jobs_df.empty:
         logger.warning("Received empty DataFrame, nothing to move")
         return {"inserted": 0, "skipped": 0, "errors": 0}
+
+    validate_dataframe(unique_jobs_df, ["id"], move_to_prepared_jobs.__name__)
 
     try:
         logger.info("Establishing database connection...")
@@ -184,11 +184,7 @@ def move_to_prepared_jobs(unique_jobs_df, export_failed_csv=True):
     )
     placeholders = ", ".join(["%s"] * len(columns_to_insert))
 
-    def get_value(row, key):
-        val = row.get(key)
-        return val if pd.notna(val) else None
-
-    def check_record_exists(row):
+    def check_record_exists(row: pd.Series) -> Optional[Tuple[Any, ...]]:
         conditions = []
         values = []
         for col in columns_to_check:
@@ -318,7 +314,7 @@ def move_to_prepared_jobs(unique_jobs_df, export_failed_csv=True):
         logger.info("Database connection closed")
 
 
-def process_jobs(batch_size=1):
+def process_jobs(batch_size: int = 1) -> Dict[str, int]:
     """
     Processes jobs from preparedjobs and moves them to processedjobs.
     Picks oldest jobs first (by prepared_at), processes them, and deletes from preparedjobs.
@@ -364,6 +360,12 @@ def process_jobs(batch_size=1):
 
         column_names = [desc[0] for desc in cursor.description]
         logger.info(f"Found {len(jobs)} jobs to process")
+
+        if "id_primary" not in column_names:
+            raise ValueError(
+                f"{process_jobs.__name__}: Query result missing required column 'id_primary'. "
+                f"Found columns: {column_names}"
+            )
 
         columns_to_insert = [
             col for col in column_names if col not in excluded_from_insert
