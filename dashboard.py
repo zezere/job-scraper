@@ -1,8 +1,7 @@
 from typing import Optional
 import streamlit as st
-import psycopg2
 import pandas as pd
-from config import DATABASE_URL
+from db_connection import get_connection
 from utils import validate_query_result
 
 
@@ -13,33 +12,23 @@ def get_processed_jobs() -> Optional[pd.DataFrame]:
     Returns:
         DataFrame with all processed jobs, or None if error
     """
-    conn = None
-    cursor = None
-
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
+        with get_connection() as (conn, cursor):
+            query = "SELECT * FROM public.processedjobs ORDER BY processed_at DESC"
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            column_names = [desc[0] for desc in cursor.description]
 
-        query = "SELECT * FROM public.processedjobs ORDER BY processed_at DESC"
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        column_names = [desc[0] for desc in cursor.description]
+            df = pd.DataFrame(rows, columns=column_names)
 
-        df = pd.DataFrame(rows, columns=column_names)
+            if not df.empty:
+                validate_query_result(df, ["title"], get_processed_jobs.__name__)
 
-        if not df.empty:
-            validate_query_result(df, ["title"], get_processed_jobs.__name__)
-
-        return df
+            return df
 
     except Exception as e:
         st.error(f"Error fetching data from database: {e}")
         return None
-    finally:
-        if cursor is not None:
-            cursor.close()
-        if conn is not None:
-            conn.close()
 
 
 def main() -> None:

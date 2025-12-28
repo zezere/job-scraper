@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional, Tuple
 import psycopg2
 import pandas as pd
 from datetime import datetime
-from config import DATABASE_URL
+from db_connection import get_connection
 from utils import get_value, validate_dataframe, validate_query_result
 
 logger = logging.getLogger(__name__)
@@ -27,101 +27,98 @@ def extract_unique_jobs(export_duplicates_csv: bool = True) -> pd.DataFrame:
 
     try:
         logger.info("Establishing database connection...")
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        logger.info("Database connection established successfully")
-    except Exception as e:
-        logger.error(f"Failed to connect to database: {e}", exc_info=True)
-        raise
+        with get_connection() as (conn, cursor):
+            logger.info("Database connection established successfully")
 
-    try:
-        logger.info("Querying all jobs from jobsli table...")
-        query = "SELECT * FROM public.jobsli ORDER BY created_at DESC"
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        column_names = [desc[0] for desc in cursor.description]
-        jobs_df = pd.DataFrame(rows, columns=column_names)
-        logger.info(f"Retrieved {len(jobs_df)} total jobs from database")
+            logger.info("Querying all jobs from jobsli table...")
+            query = "SELECT * FROM public.jobsli ORDER BY created_at DESC"
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            column_names = [desc[0] for desc in cursor.description]
+            jobs_df = pd.DataFrame(rows, columns=column_names)
+            logger.info(f"Retrieved {len(jobs_df)} total jobs from database")
 
-        if jobs_df.empty:
-            logger.warning("No jobs found in database")
-            return pd.DataFrame()
+            if jobs_df.empty:
+                logger.warning("No jobs found in database")
+                return pd.DataFrame()
 
-        validate_dataframe(jobs_df, ["id", "created_at"], extract_unique_jobs.__name__)
-
-        logger.info("Analyzing duplicates by 'id' field...")
-        id_counts = jobs_df["id"].value_counts()
-        duplicate_ids = id_counts[id_counts > 1].index.tolist()
-
-        if not duplicate_ids:
-            logger.info("No duplicate IDs found. All jobs are unique.")
-            return jobs_df
-
-        logger.info(
-            f"Found {len(duplicate_ids)} duplicate ID(s) affecting {id_counts[duplicate_ids].sum()} records"
-        )
-
-        duplicate_records = jobs_df[jobs_df["id"].isin(duplicate_ids)].copy()
-        unique_records = jobs_df[~jobs_df["id"].isin(duplicate_ids)].copy()
-
-        logger.info(f"Records breakdown:")
-        logger.info(f"  - Unique (no duplicates): {len(unique_records)}")
-        logger.info(f"  - Duplicate records: {len(duplicate_records)}")
-
-        logger.info("Converting created_at to datetime for sorting...")
-        duplicate_records["created_at"] = pd.to_datetime(
-            duplicate_records["created_at"]
-        )
-
-        if export_duplicates_csv:
-            log_dir = "logs"
-            if not os.path.exists(log_dir):
-                os.makedirs(log_dir)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            duplicate_count = len(duplicate_records)
-            csv_filename = f"logs/duplicates_{timestamp}_{duplicate_count}jobs.csv"
-
-            sorted_duplicates = duplicate_records.sort_values(
-                ["id", "created_at"], ascending=[True, False]
+            validate_dataframe(
+                jobs_df, ["id", "created_at"], extract_unique_jobs.__name__
             )
-            sorted_duplicates.to_csv(csv_filename, index=False)
+
+            logger.info("Analyzing duplicates by 'id' field...")
+            id_counts = jobs_df["id"].value_counts()
+            duplicate_ids = id_counts[id_counts > 1].index.tolist()
+
+            if not duplicate_ids:
+                logger.info("No duplicate IDs found. All jobs are unique.")
+                return jobs_df
+
             logger.info(
-                f"Exported {duplicate_count} duplicate records to {csv_filename} (sorted by id, then created_at desc)"
+                f"Found {len(duplicate_ids)} duplicate ID(s) affecting {id_counts[duplicate_ids].sum()} records"
             )
 
-        logger.info("Selecting latest record for each duplicate ID (by created_at)...")
-        latest_duplicates = (
-            duplicate_records.sort_values("created_at", ascending=False)
-            .groupby("id")
-            .first()
-            .reset_index()
-        )
+            duplicate_records = jobs_df[jobs_df["id"].isin(duplicate_ids)].copy()
+            unique_records = jobs_df[~jobs_df["id"].isin(duplicate_ids)].copy()
 
-        logger.info(
-            f"Selected {len(latest_duplicates)} latest records from duplicate groups"
-        )
+            logger.info(f"Records breakdown:")
+            logger.info(f"  - Unique (no duplicates): {len(unique_records)}")
+            logger.info(f"  - Duplicate records: {len(duplicate_records)}")
 
-        unique_jobs = pd.concat([unique_records, latest_duplicates], ignore_index=True)
-        logger.info(f"Final unique jobs count: {len(unique_jobs)}")
+            logger.info("Converting created_at to datetime for sorting...")
+            duplicate_records["created_at"] = pd.to_datetime(
+                duplicate_records["created_at"]
+            )
 
-        logger.info("=" * 60)
-        logger.info("Unique jobs extraction completed:")
-        logger.info(f"  - Total jobs in database: {len(jobs_df)}")
-        logger.info(f"  - Unique jobs extracted: {len(unique_jobs)}")
-        logger.info(
-            f"  - Duplicate records removed: {len(duplicate_records) - len(latest_duplicates)}"
-        )
-        logger.info("=" * 60)
+            if export_duplicates_csv:
+                log_dir = "logs"
+                if not os.path.exists(log_dir):
+                    os.makedirs(log_dir)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                duplicate_count = len(duplicate_records)
+                csv_filename = f"logs/duplicates_{timestamp}_{duplicate_count}jobs.csv"
 
-        return unique_jobs
+                sorted_duplicates = duplicate_records.sort_values(
+                    ["id", "created_at"], ascending=[True, False]
+                )
+                sorted_duplicates.to_csv(csv_filename, index=False)
+                logger.info(
+                    f"Exported {duplicate_count} duplicate records to {csv_filename} (sorted by id, then created_at desc)"
+                )
+
+            logger.info(
+                "Selecting latest record for each duplicate ID (by created_at)..."
+            )
+            latest_duplicates = (
+                duplicate_records.sort_values("created_at", ascending=False)
+                .groupby("id")
+                .first()
+                .reset_index()
+            )
+
+            logger.info(
+                f"Selected {len(latest_duplicates)} latest records from duplicate groups"
+            )
+
+            unique_jobs = pd.concat(
+                [unique_records, latest_duplicates], ignore_index=True
+            )
+            logger.info(f"Final unique jobs count: {len(unique_jobs)}")
+
+            logger.info("=" * 60)
+            logger.info("Unique jobs extraction completed:")
+            logger.info(f"  - Total jobs in database: {len(jobs_df)}")
+            logger.info(f"  - Unique jobs extracted: {len(unique_jobs)}")
+            logger.info(
+                f"  - Duplicate records removed: {len(duplicate_records) - len(latest_duplicates)}"
+            )
+            logger.info("=" * 60)
+
+            return unique_jobs
 
     except Exception as e:
         logger.error(f"Error during unique jobs extraction: {e}", exc_info=True)
         raise
-    finally:
-        cursor.close()
-        conn.close()
-        logger.info("Database connection closed")
 
 
 def move_to_prepared_jobs(
@@ -149,15 +146,6 @@ def move_to_prepared_jobs(
 
     validate_dataframe(unique_jobs_df, ["id"], move_to_prepared_jobs.__name__)
 
-    try:
-        logger.info("Establishing database connection...")
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        logger.info("Database connection established successfully")
-    except Exception as e:
-        logger.error(f"Failed to connect to database: {e}", exc_info=True)
-        raise
-
     excluded_from_uniqueness = {"id_primary", "created_at", "prepared_at"}
     excluded_from_insert = {"id_primary", "prepared_at"}
 
@@ -173,49 +161,54 @@ def move_to_prepared_jobs(
     logger.info(f"Excluded from uniqueness check: {excluded_from_uniqueness}")
     logger.info(f"Excluded from insert: {excluded_from_insert}")
 
-    inserted_count = 0
-    skipped_count = 0
-    error_count = 0
-    skipped_records = []
-    failed_records = []
-
     columns_str = ", ".join(
         [f'"{col}"' if col == "interval" else col for col in columns_to_insert]
     )
     placeholders = ", ".join(["%s"] * len(columns_to_insert))
-
-    def check_record_exists(row: pd.Series) -> Optional[Tuple[Any, ...]]:
-        conditions = []
-        values = []
-        for col in columns_to_check:
-            val = get_value(row, col)
-            if val is None:
-                conditions.append(
-                    f'"{col}" IS NULL' if col == "interval" else f"{col} IS NULL"
-                )
-            else:
-                conditions.append(
-                    f'"{col}" = %s' if col == "interval" else f"{col} = %s"
-                )
-                values.append(val)
-
-        check_query = f"""
-        SELECT id_primary, id FROM public.preparedjobs
-        WHERE {' AND '.join(conditions)}
-        LIMIT 1
-        """
-        cursor.execute(check_query, values)
-        return cursor.fetchone()
 
     insert_query = f"""
     INSERT INTO public.preparedjobs ({columns_str})
     VALUES ({placeholders})
     """
 
-    logger.info(f"Processing {len(unique_jobs_df)} unique jobs...")
-    # Performance note: For large datasets, consider optimizing with batch checks or NOT EXISTS queries
-
     try:
+        logger.info("Establishing database connection...")
+        with get_connection() as (conn, cursor):
+            logger.info("Database connection established successfully")
+
+            def check_record_exists(row: pd.Series) -> Optional[Tuple[Any, ...]]:
+                conditions = []
+                values = []
+                for col in columns_to_check:
+                    val = get_value(row, col)
+                    if val is None:
+                        conditions.append(
+                            f'"{col}" IS NULL'
+                            if col == "interval"
+                            else f"{col} IS NULL"
+                        )
+                    else:
+                        conditions.append(
+                            f'"{col}" = %s' if col == "interval" else f"{col} = %s"
+                        )
+                        values.append(val)
+
+                check_query = f"""
+                SELECT id_primary, id FROM public.preparedjobs
+                WHERE {' AND '.join(conditions)}
+                LIMIT 1
+                """
+                cursor.execute(check_query, values)
+                return cursor.fetchone()
+
+            inserted_count = 0
+            skipped_count = 0
+            error_count = 0
+            skipped_records = []
+            failed_records = []
+
+            logger.info(f"Processing {len(unique_jobs_df)} unique jobs...")
+            # Performance note: For large datasets, consider optimizing with batch checks or NOT EXISTS queries
         for idx, (_, row) in enumerate(unique_jobs_df.iterrows(), 1):
             job_id = row.get("id", "unknown")
             job_title = row.get("title", "unknown")
@@ -292,26 +285,22 @@ def move_to_prepared_jobs(
                     f"{len(failed_records)} records failed but CSV export is disabled"
                 )
 
-        logger.info("=" * 60)
-        logger.info("Move to preparedjobs completed:")
-        logger.info(f"  - Inserted: {inserted_count} jobs")
-        logger.info(f"  - Skipped (duplicates): {skipped_count} jobs")
-        logger.info(f"  - Errors: {error_count} jobs")
-        logger.info("=" * 60)
+            logger.info("=" * 60)
+            logger.info("Move to preparedjobs completed:")
+            logger.info(f"  - Inserted: {inserted_count} jobs")
+            logger.info(f"  - Skipped (duplicates): {skipped_count} jobs")
+            logger.info(f"  - Errors: {error_count} jobs")
+            logger.info("=" * 60)
 
-        return {
-            "inserted": inserted_count,
-            "skipped": skipped_count,
-            "errors": error_count,
-        }
+            return {
+                "inserted": inserted_count,
+                "skipped": skipped_count,
+                "errors": error_count,
+            }
 
     except Exception as e:
         logger.error(f"Error during move to preparedjobs: {e}", exc_info=True)
         raise
-    finally:
-        cursor.close()
-        conn.close()
-        logger.info("Database connection closed")
 
 
 def process_jobs(batch_size: int = 1) -> Dict[str, int]:
@@ -329,120 +318,111 @@ def process_jobs(batch_size: int = 1) -> Dict[str, int]:
     logger.info("Starting job processing")
     logger.info("=" * 60)
 
-    try:
-        logger.info("Establishing database connection...")
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        logger.info("Database connection established successfully")
-    except Exception as e:
-        logger.error(f"Failed to connect to database: {e}", exc_info=True)
-        raise
-
     excluded_from_insert = {"id_primary", "processed_at"}
 
-    processed_count = 0
-    error_count = 0
-    failed_jobs = []
-
     try:
-        logger.info(f"Querying {batch_size} oldest jobs from preparedjobs...")
-        query = f"""
-        SELECT * FROM public.preparedjobs 
-        ORDER BY prepared_at ASC 
-        LIMIT %s
-        """
-        cursor.execute(query, (batch_size,))
-        jobs = cursor.fetchall()
+        logger.info("Establishing database connection...")
+        with get_connection() as (conn, cursor):
+            logger.info("Database connection established successfully")
 
-        if not jobs:
-            logger.info("No jobs found in preparedjobs to process")
-            return {"processed": 0, "errors": 0}
+            processed_count = 0
+            error_count = 0
+            failed_jobs = []
 
-        column_names = [desc[0] for desc in cursor.description]
-        logger.info(f"Found {len(jobs)} jobs to process")
+            logger.info(f"Querying {batch_size} oldest jobs from preparedjobs...")
+            query = f"""
+            SELECT * FROM public.preparedjobs 
+            ORDER BY prepared_at ASC 
+            LIMIT %s
+            """
+            cursor.execute(query, (batch_size,))
+            jobs = cursor.fetchall()
 
-        if "id_primary" not in column_names:
-            raise ValueError(
-                f"{process_jobs.__name__}: Query result missing required column 'id_primary'. "
-                f"Found columns: {column_names}"
+            if not jobs:
+                logger.info("No jobs found in preparedjobs to process")
+                return {"processed": 0, "errors": 0}
+
+            column_names = [desc[0] for desc in cursor.description]
+            logger.info(f"Found {len(jobs)} jobs to process")
+
+            if "id_primary" not in column_names:
+                raise ValueError(
+                    f"{process_jobs.__name__}: Query result missing required column 'id_primary'. "
+                    f"Found columns: {column_names}"
+                )
+
+            columns_to_insert = [
+                col for col in column_names if col not in excluded_from_insert
+            ]
+            columns_str = ", ".join(
+                [f'"{col}"' if col == "interval" else col for col in columns_to_insert]
             )
+            placeholders = ", ".join(["%s"] * len(columns_to_insert))
 
-        columns_to_insert = [
-            col for col in column_names if col not in excluded_from_insert
-        ]
-        columns_str = ", ".join(
-            [f'"{col}"' if col == "interval" else col for col in columns_to_insert]
-        )
-        placeholders = ", ".join(["%s"] * len(columns_to_insert))
+            insert_query = f"""
+            INSERT INTO public.processedjobs ({columns_str})
+            VALUES ({placeholders})
+            """
 
-        insert_query = f"""
-        INSERT INTO public.processedjobs ({columns_str})
-        VALUES ({placeholders})
-        """
+            delete_query = """
+            DELETE FROM public.preparedjobs
+            WHERE id_primary = %s
+            """
 
-        delete_query = """
-        DELETE FROM public.preparedjobs
-        WHERE id_primary = %s
-        """
+            logger.info(f"Processing {len(jobs)} jobs...")
 
-        logger.info(f"Processing {len(jobs)} jobs...")
+            for idx, job_row in enumerate(jobs, 1):
+                job_dict = dict(zip(column_names, job_row))
+                id_primary = job_dict["id_primary"]
+                job_id = job_dict.get("id", "unknown")
+                job_title = job_dict.get("title", "unknown")
 
-        for idx, job_row in enumerate(jobs, 1):
-            job_dict = dict(zip(column_names, job_row))
-            id_primary = job_dict["id_primary"]
-            job_id = job_dict.get("id", "unknown")
-            job_title = job_dict.get("title", "unknown")
+                try:
+                    values = tuple(job_dict[col] for col in columns_to_insert)
 
-            try:
-                values = tuple(job_dict[col] for col in columns_to_insert)
+                    cursor.execute(insert_query, values)
+                    cursor.execute(delete_query, (id_primary,))
+                    conn.commit()
 
-                cursor.execute(insert_query, values)
-                cursor.execute(delete_query, (id_primary,))
-                conn.commit()
+                    processed_count += 1
+                    logger.debug(
+                        f"Processed job {idx}/{len(jobs)}: id={job_id}, title={job_title}"
+                    )
 
-                processed_count += 1
-                logger.debug(
-                    f"Processed job {idx}/{len(jobs)}: id={job_id}, title={job_title}"
-                )
+                except Exception as e:
+                    conn.rollback()
+                    error_count += 1
+                    failed_jobs.append(
+                        {
+                            "id_primary": id_primary,
+                            "id": job_id,
+                            "title": job_title,
+                            "error": str(e),
+                        }
+                    )
+                    logger.error(
+                        f"Error processing job '{job_title}' (id: {job_id}, id_primary: {id_primary}): {e}",
+                        exc_info=True,
+                    )
+                    continue
 
-            except Exception as e:
-                conn.rollback()
-                error_count += 1
-                failed_jobs.append(
-                    {
-                        "id_primary": id_primary,
-                        "id": job_id,
-                        "title": job_title,
-                        "error": str(e),
-                    }
-                )
-                logger.error(
-                    f"Error processing job '{job_title}' (id: {job_id}, id_primary: {id_primary}): {e}",
-                    exc_info=True,
-                )
-                continue
+            if failed_jobs:
+                logger.warning(f"Failed to process {len(failed_jobs)} jobs:")
+                for failed in failed_jobs[:5]:
+                    logger.warning(
+                        f"  - id_primary={failed['id_primary']}, id={failed['id']}, title={failed['title']}: {failed['error'][:100]}"
+                    )
+                if len(failed_jobs) > 5:
+                    logger.warning(f"  ... and {len(failed_jobs) - 5} more")
 
-        if failed_jobs:
-            logger.warning(f"Failed to process {len(failed_jobs)} jobs:")
-            for failed in failed_jobs[:5]:
-                logger.warning(
-                    f"  - id_primary={failed['id_primary']}, id={failed['id']}, title={failed['title']}: {failed['error'][:100]}"
-                )
-            if len(failed_jobs) > 5:
-                logger.warning(f"  ... and {len(failed_jobs) - 5} more")
+            logger.info("=" * 60)
+            logger.info("Job processing completed:")
+            logger.info(f"  - Processed: {processed_count} jobs")
+            logger.info(f"  - Errors: {error_count} jobs")
+            logger.info("=" * 60)
 
-        logger.info("=" * 60)
-        logger.info("Job processing completed:")
-        logger.info(f"  - Processed: {processed_count} jobs")
-        logger.info(f"  - Errors: {error_count} jobs")
-        logger.info("=" * 60)
-
-        return {"processed": processed_count, "errors": error_count}
+            return {"processed": processed_count, "errors": error_count}
 
     except Exception as e:
         logger.error(f"Error during job processing: {e}", exc_info=True)
         raise
-    finally:
-        cursor.close()
-        conn.close()
-        logger.info("Database connection closed")

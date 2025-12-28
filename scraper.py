@@ -18,8 +18,8 @@ def run_scraper() -> None:
 
     search_params: Dict[str, Any] = {
         "site_name": "linkedin",
-        "search_term": "data analyst",
-        "location": "Luxembourg",
+        "search_term": "data engineer",
+        "location": "Stockholm",
         "results_wanted": 30,
         "hours_old": 24,
         "verbose": 2,
