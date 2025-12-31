@@ -3,7 +3,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+try:
+    import streamlit as st
+except ImportError:
+    st = None
+
 DATABASE_URL = os.getenv("DATABASE_URL", None)
+
+if not DATABASE_URL and st is not None:
+    try:
+        # Check if running in Streamlit Cloud
+        DATABASE_URL = st.secrets["DATABASE_URL"]
+    except (FileNotFoundError, KeyError):
+        # Local streamlit run might not have secrets.toml
+        pass
+
+# Fallback for old way if secrets didn't work and env var is missing
+DATABASE_URL = DATABASE_URL or os.getenv("DATABASE_URL", None)
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL must be set in .env file")
 
