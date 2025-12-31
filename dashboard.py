@@ -14,7 +14,7 @@ def get_processed_jobs() -> Optional[pd.DataFrame]:
     """
     try:
         with get_connection() as (conn, cursor):
-            query = "SELECT * FROM public.processedjobs ORDER BY processed_at DESC"
+            query = "SELECT * FROM public.processedjobs ORDER BY seen_first_at DESC"
             cursor.execute(query)
             rows = cursor.fetchall()
             column_names = [desc[0] for desc in cursor.description]
