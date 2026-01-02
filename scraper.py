@@ -4,6 +4,7 @@ import psycopg2
 import pandas as pd
 from jobspy import scrape_jobs
 from db_connection import get_connection
+from db_ops import insert_row
 from utils import setup_logging, get_value, validate_dataframe
 from config import SCRAPER_SETTINGS, SCRAPER_RETRY_ATTEMPTS, SCRAPER_RETRY_DELAY
 
@@ -40,11 +41,9 @@ def save_jobs(jobs_df: pd.DataFrame) -> None:
     """
     Saves jobs from a DataFrame to the jobsli table in the database.
 
-    Handles duplicate IDs by skipping existing records. Only saves columns
-    that exist in both the DataFrame and the table schema.
-
-    Args:
-        jobs_df: DataFrame containing job data with at least an 'id' column
+    Uses standard DB connection and the generic inserts from db_ops.
+    Iterates through rows and attempts insert, skipping duplicates gracefully
+    via IntegrityError handling.
     """
     logger.info(f"save_jobs called with {len(jobs_df)} jobs to process")
 
@@ -53,21 +52,6 @@ def save_jobs(jobs_df: pd.DataFrame) -> None:
         return
 
     validate_dataframe(jobs_df, ["id"], save_jobs.__name__)
-
-    available_columns = [col for col in TABLE_COLUMNS if col in jobs_df.columns]
-    missing_columns = [col for col in TABLE_COLUMNS if col not in jobs_df.columns]
-
-    logger.info(
-        f"Found {len(available_columns)} matching columns out of {len(TABLE_COLUMNS)} expected"
-    )
-    if missing_columns:
-        logger.warning(f"Missing columns in data: {missing_columns}")
-
-    if not available_columns:
-        logger.error(
-            "No matching columns found between table and data. Cannot proceed with insert."
-        )
-        return
 
     try:
         logger.info("Establishing database connection...")
@@ -78,64 +62,31 @@ def save_jobs(jobs_df: pd.DataFrame) -> None:
             skipped_count = 0
             failed_jobs = []
 
-            columns_str = ", ".join(
-                [f'"{col}"' if col == "interval" else col for col in available_columns]
-            )
-            placeholders = ", ".join(["%s"] * len(available_columns))
-
-            insert_query = f"""
-            INSERT INTO public.jobsli ({columns_str})
-            VALUES ({placeholders})
-            """
-
-            logger.debug(f"Insert query prepared with {len(available_columns)} columns")
-
             logger.info("Starting to insert jobs into database...")
             for idx, (_, row) in enumerate(jobs_df.iterrows(), 1):
                 job_title = row.get("title", "unknown")
                 job_url = row.get("job_url", "N/A")
 
                 try:
-                    values = tuple(get_value(row, col) for col in available_columns)
-
-                    cursor.execute(insert_query, values)
+                    # Use the new generic insert function
+                    insert_row(cursor=cursor, table_name="jobsli", data=row)
                     conn.commit()
-
                     saved_count += 1
+
                     if idx % 10 == 0:
-                        logger.debug(
-                            f"Progress: {idx}/{len(jobs_df)} jobs processed ({saved_count} saved, {skipped_count} skipped)"
-                        )
+                        logger.debug(f"Progress: {idx}/{len(jobs_df)} jobs processed")
 
                 except psycopg2.IntegrityError as e:
                     conn.rollback()
-                    logger.warning(
-                        f"Integrity error for job '{job_title}' (URL: {job_url}): {e}"
-                    )
+                    logger.warning(f"Integrity error for job '{job_title}': {e}")
                     skipped_count += 1
-                    failed_jobs.append(
-                        {
-                            "title": job_title,
-                            "url": job_url,
-                            "error": str(e),
-                            "type": "integrity",
-                        }
-                    )
+                    failed_jobs.append({"title": job_title, "error": str(e)})
+
                 except Exception as e:
                     conn.rollback()
-                    logger.error(
-                        f"Error saving job '{job_title}' (URL: {job_url}): {e}",
-                        exc_info=True,
-                    )
+                    logger.error(f"Error saving job '{job_title}': {e}", exc_info=True)
                     skipped_count += 1
-                    failed_jobs.append(
-                        {
-                            "title": job_title,
-                            "url": job_url,
-                            "error": str(e),
-                            "type": "other",
-                        }
-                    )
+                    failed_jobs.append({"title": job_title, "error": str(e)})
 
             logger.info("=" * 60)
             logger.info(f"Database save operation completed:")
@@ -158,7 +109,7 @@ def save_jobs(jobs_df: pd.DataFrame) -> None:
 
 def scrape_linkedin(
     search_term: str = "product analyst",
-    location: str = "Lisbon",
+    location: str = "luxembourg",
     results_wanted: int = SCRAPER_SETTINGS["results_wanted"],
     hours_old: int = SCRAPER_SETTINGS["hours_old"],
     verbose: int = SCRAPER_SETTINGS["verbose"],
@@ -209,10 +160,11 @@ def scrape_linkedin(
 
         except Exception as e:
             logger.error(
-                f"Error during scraping process (Attempt {attempt + 1}/{SCRAPER_RETRY_ATTEMPTS}): {e}"
+                f"Error during scraping process (Attempt {attempt + 1}/{SCRAPER_RETRY_ATTEMPTS}): {e}",
+                exc_info=True,
             )
             if attempt == SCRAPER_RETRY_ATTEMPTS - 1:
-                logger.error("Max retries reached. Raising exception.")
+                logger.error("Max retries reached. Raising exception.", exc_info=True)
                 raise
 
             delay = SCRAPER_RETRY_DELAY * (2**attempt)
@@ -221,4 +173,4 @@ def scrape_linkedin(
 
 
 if __name__ == "__main__":
-    scrape_linkedin()
+    scrape_linkedin(results_wanted=10)

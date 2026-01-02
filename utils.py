@@ -5,22 +5,49 @@ from typing import Optional, Any, List
 import pandas as pd
 
 
-def setup_logging(log_name: str = "app") -> logging.Logger:
-    log_dir = "logs"
+from logging.handlers import RotatingFileHandler
+
+
+def setup_logging(log_name: str = "app", log_dir: str = "logs") -> logging.Logger:
+    """
+    Sets up a logger with a RotatingFileHandler and StreamHandler.
+    Ensures that handlers are not duplicated if the logger is already retrieved.
+    """
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
-    log_filename = os.path.join(
-        log_dir, f"{log_name}_{datetime.now().strftime('%Y%m%d')}.log"
+    # Get the logger
+    logger = logging.getLogger(log_name)
+    logger.setLevel(logging.INFO)
+
+    # If handlers exist, return immediately to avoid duplicates
+    if logger.hasHandlers():
+        return logger
+
+    # Create formatters and handlers
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler(log_filename), logging.StreamHandler()],
+    # File Handler - strict separation by log_name
+    log_filename = os.path.join(log_dir, f"{log_name}.log")
+    file_handler = RotatingFileHandler(
+        log_filename, maxBytes=5 * 1024 * 1024, backupCount=5  # 5MB props
     )
+    file_handler.setFormatter(formatter)
 
-    return logging.getLogger(log_name)
+    # Stream Handler (Console)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+
+    # Add handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+
+    # Prevent propagation to root logger (avoid double logging if basicConfig was used elsewhere)
+    logger.propagate = False
+
+    return logger
 
 
 def get_value(row: pd.Series, key: str) -> Optional[Any]:

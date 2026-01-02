@@ -21,25 +21,25 @@ High-Level Process:
 3.  **Assessment & Status Decision**:
     Based on the candidates found (or lack thereof), the `match_job` function determines the job's fate:
 
-    -   **Unique ("unique")**:
-        -   Condition: No matching candidates found in the database.
-        -   Action: The job is considered new. It is copied to the `preparedjobs` table with status "new".
-        -   Outcome: `jobsli` status updated to "unique".
+    -   **Unique ("new")**:
+        -   Condition: No matching candidates found in the database. The job is considered new.
+        -   Target: Job is copied to the `preparedjobs` table with status "new".
+        -   Source: Job's status in `jobsli` is updated to "new".
 
-    -   **Duplicate ("candidates_found" + strict check)**:
+    -   **Duplicate ("duplicate: <id_list>")**:
         -   Condition: At least one candidate is an *exact match* on all significant fields (excluding `id_primary`/timestamps).
-        -   Action: The job is flagged as a duplicate. It is copied to `preparedjobs` with status "duplicate: <id_list>".
-        -   Outcome: `jobsli` status updated to "duplicate: <id_list>".
+        -   Target: Job is copied to `preparedjobs` with status "duplicate: <id_list>".
+        -   Source: Job's status in `jobsli` is updated to "duplicate: <id_list>".
+        -   Note: There may be other non-duplicate candidates, those are currently IGNORED. TODO: SUBJECT FOR IMPROVEMENT LATER.
 
-    -   **Similar ("candidates_found" + no strict match)**:
+    -   **Similar ("similar: <id_list>")**:
         -   Condition: Candidates were found by the loose SQL criteria, but NONE of them were exact text-matches.
-        -   Action: The job is flagged as similar (likely a repost or variant). It is copied to `similarjobs` with status "similar: <id_list>".
-        -   Outcome: `jobsli` status updated to "similar: <id_list>".
+        -   Target: Job is copied to `similarjobs` with status "similar: <id_list>".
+        -   Source: Job's status in `jobsli` is updated to "similar: <id_list>".
 
     -   **Special Cases**:
         -   **Unmatchable**: If the job lacks all critical fields (title, company, etc.), it can't be processed. Status -> "unmatchable".
-        -   **Abandoned**: If a candidate is currently locked ("worker_..."), we back off and try later. Status -> NULL.
-        -   **Error**: Any crash during processing reverts the job status to NULL so it can be retried.
+        -   **Error**: Any crash during processing sets the job status to "error".
 
 4.  **Tables Involved**:
     -   `jobsli`: The raw intake table. Jobs stay here but get their `status` updated.
@@ -47,16 +47,14 @@ High-Level Process:
     -   `similarjobs`: The destination for "similar" jobs, kept aside for review or separate logic.
 """
 
-import logging
-import re
-import sys
 import traceback
 from typing import Tuple, Any
 import pandas as pd
-import numpy as np
 from db_connection import get_connection
 from utils import setup_logging, get_value
 import time
+
+from db_ops import fetch_and_lock_job, transfer_job
 
 logger = setup_logging("matcher")
 
@@ -101,57 +99,6 @@ def _log_dataframe_rows(df: pd.DataFrame, title: str = "CANDIDATES") -> None:
         _format_row_info(row, identifier, logger.info)
 
 
-def _copy_job_generic(
-    cursor, id_primary: int, target_table: str, status_value: str
-) -> None:
-    """
-    Internal helper to copy a job from jobsli to a target table.
-    Used for duplicates and similar jobs (custom status).
-    Does NOT affect prepare_new_job.
-    """
-    logger.debug(
-        f"Copying job {id_primary} to {target_table} with status '{status_value}'"
-    )
-
-    # Fetch column names dynamically from jobsli
-    cursor.execute("SELECT * FROM public.jobsli LIMIT 0")
-    columns = [desc[0] for desc in cursor.description]
-
-    # Build column lists for INSERT
-    quoted_cols = []
-    for col in columns:
-        if col == "interval" or " " in col:
-            quoted_cols.append(f'"{col}"')
-        else:
-            quoted_cols.append(col)
-
-    cols_str = ", ".join(quoted_cols)
-
-    # Build SELECT values
-    select_parts = []
-    for col, safe_col in zip(columns, quoted_cols):
-        if col == "status":
-            # Escape single quotes in status value just in case
-            safe_status = status_value.replace("'", "''")
-            select_parts.append(f"'{safe_status}'")
-        else:
-            select_parts.append(safe_col)
-    select_str = ", ".join(select_parts)
-
-    # Insert with explicit columns
-    insert_query = f"""
-        INSERT INTO public.{target_table} ({cols_str}) 
-        SELECT {select_str} 
-        FROM public.jobsli 
-        WHERE id_primary = %s
-    """
-    cursor.execute(insert_query, (id_primary,))
-
-    # Update status in jobsli
-    update_jobsli_query = "UPDATE public.jobsli SET status = %s WHERE id_primary = %s"
-    cursor.execute(update_jobsli_query, (status_value, id_primary))
-
-
 def _generate_status_string(label: str, ids: list[str]) -> str:
     """
     Constructs the status string for duplicates or similar jobs.
@@ -159,7 +106,15 @@ def _generate_status_string(label: str, ids: list[str]) -> str:
     """
     if not ids:
         return label
-    return f"{label}: {', '.join(ids)}"
+
+    # Sort IDs numerically to ensure consistent order (e.g. 2 before 10)
+    try:
+        sorted_ids = sorted(ids, key=int)
+    except ValueError:
+        # Fallback to string sort if non-integer IDs exist
+        sorted_ids = sorted(ids)
+
+    return f"{label}: {', '.join(sorted_ids)}"
 
 
 def is_duplicate_job(job_row: pd.Series, candidate_row: pd.Series) -> bool:
@@ -193,43 +148,28 @@ def is_duplicate_job(job_row: pd.Series, candidate_row: pd.Series) -> bool:
 
 def pick_job_for_matching(cursor, id_primary: int | None = None) -> pd.Series | None:
     """
-    Selects and marks a job for matching.
-
-    If id_primary is None, selects the oldest row with null/empty status.
-    If id_primary is provided, selects that specific row.
-    In both cases, marks the row with the worker ID ("worker_1").
+    Selects and marks a job for matching using db_ops.fetch_and_lock_job.
     """
     worker_id = "worker_1"
 
-    if id_primary is None:
-        logger.debug("Selecting oldest row with null/empty status")
-        update_query = """
-            UPDATE public.jobsli
-            SET status = %s
-            WHERE id_primary = (
-                SELECT id_primary
-                FROM public.jobsli
-                WHERE status IS NULL OR status = ''
-                ORDER BY created_at ASC, id_primary ASC
-                LIMIT 1
-            )
-            RETURNING *
-        """
-        cursor.execute(update_query, (worker_id,))
-    else:
+    if id_primary is not None:
         logger.debug(f"Loading and marking row with id_primary={id_primary}")
-        update_query = (
-            "UPDATE public.jobsli SET status = %s WHERE id_primary = %s RETURNING *"
-        )
-        cursor.execute(update_query, (worker_id, id_primary))
+        # Build specific condition for ID
+        conditions = f"id_primary = {id_primary}"
+        # Order doesn't matter much for single ID, but required by API
+        order_by = "id_primary"
+    else:
+        logger.debug("Selecting oldest row with null/empty status")
+        conditions = "status IS NULL OR status = ''"
+        order_by = "created_at ASC, id_primary ASC"
 
-    row = cursor.fetchone()
-
-    if row is None:
-        return None
-
-    column_names = [desc[0] for desc in cursor.description]
-    return pd.Series(row, index=column_names)
+    return fetch_and_lock_job(
+        cursor=cursor,
+        table_name="jobsli",
+        worker_id=worker_id,
+        conditions=conditions,
+        order_by=order_by,
+    )
 
 
 def sql_find_candidates(
@@ -254,7 +194,6 @@ def sql_find_candidates(
           - "candidates_found": Matches found, candidates dataframe returned
           - "unmatchable": Cannot match because all required fields are empty/null
           - "error": An error occurred during SQL query execution
-          - "abandoned": Matching interrupted due to some candidates being worked on
         - candidates_df: DataFrame with candidate matches (empty if none found)
     """
     # ==============================
@@ -269,8 +208,7 @@ def sql_find_candidates(
     #    - title
     #    - company
     # 3. If no matches, then the job is unique.
-    # 4. if field "status" starts with string "worker_" for at least one candidate, abandon matching.
-    # 5. otherwise return the candidates dataframe and assessment "candidates_found"
+    # 4. otherwise return the candidates dataframe and assessment "candidates_found"
     # ==============================
 
     logger.debug(
@@ -381,20 +319,7 @@ def sql_find_candidates(
             )
             return job_row, "unique", pd.DataFrame()
 
-        # Step 4: If field "status" starts with string "worker_" on at least one row,
-        # return empty dataframe and assessment "abandoned"
-        if "status" in candidates_df.columns:
-            abandoned_mask = (
-                candidates_df["status"].fillna("").astype(str).str.startswith("worker_")
-            )
-            if abandoned_mask.any():
-                abandoned_count = abandoned_mask.sum()
-                logger.warning(
-                    f"Matching abandoned: {abandoned_count} candidate(s) have status starting with 'worker_'"
-                )
-                return job_row, "abandoned", pd.DataFrame()
-
-        # Step 5: Return the candidates dataframe and assessment "matches_found"
+        # Step 4: Return the candidates dataframe and assessment "matches_found"
         logger.info(
             f"Found {len(candidates_df)} matching candidate(s) for job id_primary={job_id_primary}"
         )
@@ -459,13 +384,23 @@ def match_job(id_primary: int | None = None) -> pd.Series:
                 # Step 3: Handle the assessment
                 if assessment == "unique":
                     try:
-                        _copy_job_generic(cursor, job_id_primary, "preparedjobs", "new")
+                        transfer_job(
+                            cursor=cursor,
+                            job_id=job_id_primary,
+                            source_table="jobsli",
+                            target_table="preparedjobs",
+                            target_status="new",
+                            delete_source=False,
+                            source_status="new",
+                            source_status_on_failure="new",
+                        )
                         logger.info(
                             f"Job {job_id_primary} processed as unique (prepared/new)"
                         )
                     except Exception as e:
                         logger.error(
-                            f"Failed to copy job {job_id_primary} to preparedjobs: {e}"
+                            f"Failed to copy job {job_id_primary} to preparedjobs: {e}",
+                            exc_info=True,
                         )
 
                 elif assessment == "candidates_found":
@@ -489,14 +424,20 @@ def match_job(id_primary: int | None = None) -> pd.Series:
                         )
 
                         try:
-                            # Copy to preparedjobs with "duplicate: ..." status
-                            # Use our internal generic helper, preserving prepare_new_job logic elsewhere
-                            _copy_job_generic(
-                                cursor, job_id_primary, "preparedjobs", status_msg
+                            transfer_job(
+                                cursor=cursor,
+                                job_id=job_id_primary,
+                                source_table="jobsli",
+                                target_table="preparedjobs",
+                                target_status=status_msg,
+                                delete_source=False,
+                                source_status=status_msg,
+                                source_status_on_failure=status_msg,
                             )
                         except Exception as e:
                             logger.error(
-                                f"Failed to process duplicate job {job_id_primary}: {e}"
+                                f"Failed to process duplicate job {job_id_primary}: {e}",
+                                exc_info=True,
                             )
 
                     else:
@@ -509,30 +450,21 @@ def match_job(id_primary: int | None = None) -> pd.Series:
                         )
 
                         try:
-                            # Copy to similarjobs with "similar: ..." status
-                            _copy_job_generic(
-                                cursor, job_id_primary, "similarjobs", status_msg
+                            transfer_job(
+                                cursor=cursor,
+                                job_id=job_id_primary,
+                                source_table="jobsli",
+                                target_table="similarjobs",
+                                target_status=status_msg,
+                                delete_source=False,
+                                source_status=status_msg,
+                                source_status_on_failure=status_msg,
                             )
                         except Exception as e:
                             logger.error(
-                                f"Failed to process similar job {job_id_primary}: {e}"
+                                f"Failed to process similar job {job_id_primary}: {e}",
+                                exc_info=True,
                             )
-
-                elif assessment == "abandoned":
-                    # Revert status to NULL so it can be picked up later
-                    # TODO: Implement better handling for abandoned jobs:
-                    # - Add wait/retry delay
-                    # - Consider marking with specific status temporarily
-                    # - Pick another job immediately
-                    logger.info(
-                        f"Assessment '{assessment}' for id_primary={job_id_primary} - reverting status to NULL"
-                    )
-                    update_status_query = (
-                        "UPDATE public.jobsli SET status = NULL WHERE id_primary = %s"
-                    )
-                    cursor.execute(update_status_query, (job_id_primary,))
-                    # We are essentially "quitting" this job for now.
-                    # The transaction will commit below, saving the NULL status.
 
                 elif assessment == "unmatchable":
                     # Set status to 'unmatchable' (marker that it lacks info)
@@ -545,13 +477,11 @@ def match_job(id_primary: int | None = None) -> pd.Series:
                     cursor.execute(update_status_query, (assessment, job_id_primary))
 
                 elif assessment == "error":
-                    # Revert status to NULL
+                    # Set status to 'error' to prevent infinite loop
                     logger.info(
-                        f"Assessment '{assessment}' for id_primary={job_id_primary} - reverting status to NULL"
+                        f"Assessment '{assessment}' for id_primary={job_id_primary} - setting status to 'error'"
                     )
-                    update_status_query = (
-                        "UPDATE public.jobsli SET status = NULL WHERE id_primary = %s"
-                    )
+                    update_status_query = "UPDATE public.jobsli SET status = 'error' WHERE id_primary = %s"
                     cursor.execute(update_status_query, (job_id_primary,))
 
                 else:
@@ -570,7 +500,7 @@ def match_job(id_primary: int | None = None) -> pd.Series:
 
     except Exception as e:
         logger.error(f"Error during job matching: {e}", exc_info=True)
-        traceback.print_exc()
+
         # NOTE: On error, status remains as worker_id (could be handled differently)
         return job_row if job_row is not None else pd.Series(dtype=object)
 
@@ -601,7 +531,7 @@ def run_matcher_loop(limit: int = 50) -> None:
             time.sleep(0.1)
 
         except Exception as e:
-            logger.error(f"Error in matcher loop integration: {e}")
+            logger.error(f"Error in matcher loop integration: {e}", exc_info=True)
             # If catastrophic error, break. If simple job error, match_job catches it.
             # match_job catches its own errors, re-raised ones are serious.
             break
@@ -610,43 +540,5 @@ def run_matcher_loop(limit: int = 50) -> None:
 
 
 if __name__ == "__main__":
-
-    def test_match_job(id_primary: int | None = None) -> None:
-        """
-        Test the match_job function with a specific row from the database.
-
-        Args:
-            id_primary: Optional primary ID of the job to test.
-                       If None, match_job will select the oldest row with null/empty status.
-        """
-        if id_primary is not None:
-            logger.info(f"Testing match_job with id_primary={id_primary}")
-        else:
-            logger.info(
-                "Testing match_job (will auto-select oldest row with null/empty status)"
-            )
-
-        try:
-            result_row = match_job(id_primary)
-
-            if result_row.empty:
-                logger.warning("No row was processed (empty result)")
-                return
-
-            # log empty line
-            logger.info("")
-
-            # logger.info("Matching result:")
-            # _format_row_info(
-            #     result_row, result_row.get("id_primary", "N/A"), logger.info
-            # )
-
-        except Exception as e:
-            logger.error(f"Error during matching: {e}", exc_info=True)
-            traceback.print_exc()
-            return
-
-    # Example usage (hardcode id_primary as needed):
-    for i in range(5):
-        test_match_job()
-        time.sleep(1)
+    # Run the matcher for a few jobs to verify
+    run_matcher_loop()

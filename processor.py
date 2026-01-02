@@ -54,42 +54,9 @@ import traceback
 from typing import Tuple, Optional, Any
 from db_connection import get_connection
 from utils import setup_logging, get_value
+from db_ops import fetch_and_lock_job, transfer_job
 
 logger = setup_logging("processor")
-
-# =============================================================================
-# CREATE SCRIPT OF TABLE processedjobs
-#
-# CREATE TABLE IF NOT EXISTS public.processedjobs
-# (
-#     id_primary bigint NOT NULL,
-#     id character varying COLLATE pg_catalog."default" NOT NULL,
-#     site character varying COLLATE pg_catalog."default",
-#     job_url character varying COLLATE pg_catalog."default",
-#     job_url_direct character varying COLLATE pg_catalog."default",
-#     title character varying COLLATE pg_catalog."default",
-#     company character varying COLLATE pg_catalog."default",
-#     location character varying COLLATE pg_catalog."default",
-#     date_posted character varying COLLATE pg_catalog."default",
-#     job_type character varying COLLATE pg_catalog."default",
-#     salary_source character varying COLLATE pg_catalog."default",
-#     "interval" character varying COLLATE pg_catalog."default",
-#     min_amount double precision,
-#     max_amount double precision,
-#     currency character varying COLLATE pg_catalog."default",
-#     is_remote boolean,
-#     job_level character varying COLLATE pg_catalog."default",
-#     job_function character varying COLLATE pg_catalog."default",
-#     emails character varying COLLATE pg_catalog."default",
-#     description character varying COLLATE pg_catalog."default",
-#     company_industry character varying COLLATE pg_catalog."default",
-#     company_url character varying COLLATE pg_catalog."default",
-#     company_logo character varying COLLATE pg_catalog."default",
-#     company_url_direct character varying COLLATE pg_catalog."default",
-#     seen_first_at timestamp with time zone,
-#     seen_last_at timestamp with time zone,
-#     CONSTRAINT processedjobs_pkey PRIMARY KEY (id_primary)
-# )
 
 
 def pick_job_for_processing(cursor) -> pd.Series | None:
@@ -104,32 +71,23 @@ def pick_job_for_processing(cursor) -> pd.Series | None:
     """
     worker_id = "worker_02"
 
-    # We update and return in one atomic statement
-    # The ORDER BY logic must be inside the subquery to pick the right row
-    update_query = f"""
-        UPDATE public.preparedjobs
-        SET status = '{worker_id} ' || status
-        WHERE id_primary = (
-            SELECT id_primary
-            FROM public.preparedjobs
-            WHERE status = 'new' OR status LIKE 'duplicate%'
-            ORDER BY 
-                CASE WHEN status = 'new' THEN 1 ELSE 2 END ASC, -- Prefer 'new'
-                created_at ASC,
-                id_primary ASC
-            LIMIT 1
-        )
-        RETURNING *
+    # 1. Prefer 'new' status, then 'duplicate' status.
+    # 2. Order by created_at ASC, then id_primary ASC.
+    conditions = "status = 'new' OR status LIKE 'duplicate%'"
+    order_by = """
+        CASE WHEN status = 'new' THEN 1 ELSE 2 END ASC,
+        created_at ASC,
+        id_primary ASC
     """
 
-    cursor.execute(update_query)
-    row = cursor.fetchone()
-
-    if row is None:
-        return None
-
-    column_names = [desc[0] for desc in cursor.description]
-    return pd.Series(row, index=column_names)
+    return fetch_and_lock_job(
+        cursor=cursor,
+        table_name="preparedjobs",
+        worker_id=worker_id,
+        conditions=conditions,
+        order_by=order_by,
+        limit=1,
+    )
 
 
 def process_new_job(cursor, job_row: pd.Series) -> None:
@@ -149,62 +107,28 @@ def process_new_job(cursor, job_row: pd.Series) -> None:
 
     logger.info(f"Processing NEW job: {id_primary} - {title}")
 
-    # 1. Check if exists in processedjobs
-    cursor.execute(
-        "SELECT 1 FROM public.processedjobs WHERE id_primary = %s", (id_primary,)
-    )
-    if cursor.fetchone():
-        raise ValueError(f"Job {id_primary} already exists in processedjobs table")
+    try:
+        # seen_first_at/seen_last_at are not in source, so we put them in override values.
+        overrides = {"seen_first_at": created_at, "seen_last_at": None}
 
-    # 2. Dynamic column copy
-    # Fetch processedjobs columns
-    cursor.execute("SELECT * FROM public.processedjobs LIMIT 0")
-    target_columns = [desc[0] for desc in cursor.description]
+        transfer_job(
+            cursor=cursor,
+            job_id=id_primary,
+            source_table="preparedjobs",
+            target_table="processedjobs",
+            target_status=None,
+            target_override_values=overrides,
+            delete_source=True,
+            source_status=None,
+            source_status_on_failure="error: target_exists",
+        )
+        logger.info(f"Successfully moved job {id_primary} to processedjobs")
 
-    # Build insert logic
-    insert_cols = []
-    insert_vals = []
-    placeholders = []
+    except ValueError as e:
+        # transfer_job might raise ValueError if job not found or multiple found
+        logger.error(f"Error moving job {id_primary}: {e}", exc_info=True)
 
-    excluded_source_cols = {
-        "created_at",
-        "prepared_at",
-        "status",
-    }
-
-    for col in target_columns:
-        if col == "seen_first_at":
-            insert_cols.append(col)
-            insert_vals.append(created_at)
-            placeholders.append("%s")
-        elif col == "seen_last_at":
-            insert_cols.append(col)
-            insert_vals.append(None)
-            placeholders.append("%s")
-        elif col in excluded_source_cols:
-            continue
-        else:
-            # Map standard columns if they exist in source
-            if col in job_row.index:
-                insert_cols.append(
-                    f'"{col}"' if col == "interval" or " " in col else col
-                )
-                insert_vals.append(get_value(job_row, col))
-                placeholders.append("%s")
-
-    cols_str = ", ".join(insert_cols)
-    placeholders_str = ", ".join(placeholders)
-
-    insert_query = (
-        f"INSERT INTO public.processedjobs ({cols_str}) VALUES ({placeholders_str})"
-    )
-    cursor.execute(insert_query, tuple(insert_vals))
-
-    # 3. Delete from preparedjobs
-    cursor.execute(
-        "DELETE FROM public.preparedjobs WHERE id_primary = %s", (id_primary,)
-    )
-    logger.info(f"Successfully moved job {id_primary} to processedjobs")
+        raise
 
 
 def process_duplicate_job(cursor, job_row: pd.Series, status_msg: str) -> None:
@@ -334,9 +258,15 @@ def process_duplicate_job(cursor, job_row: pd.Series, status_msg: str) -> None:
     )
 
     # Update original's seen_last_at using duplicate's created_at
-    cursor.execute(
-        "UPDATE public.processedjobs SET seen_last_at = %s WHERE id_primary = %s",
-        (duplicate_created_at, original_id),
+    # We can use generic update_row, but we need to construct the data dict
+    from db_ops import update_row
+
+    update_data = {"seen_last_at": duplicate_created_at}
+    update_row(
+        cursor=cursor,
+        table_name="processedjobs",
+        data=update_data,
+        id_primary=original_id,
     )
 
     # Delete duplicate from preparedjobs
@@ -382,8 +312,8 @@ def process_job(cursor) -> bool:
             _mark_failed(cursor, job_id, "failed_unknown_status")
 
     except Exception as e:
-        logger.error(f"Error processing job {job_id}: {e}")
-        traceback.print_exc()
+        logger.error(f"Error processing job {job_id}: {e}", exc_info=True)
+
         _mark_failed(cursor, job_id, "failed_exception")
 
     return True
@@ -417,12 +347,12 @@ def run_processor_loop(limit: int = 0) -> None:
             logger.info("Processor loop stopped by user.")
             break
         except Exception as e:
-            logger.error(f"Unexpected error in processor loop: {e}")
-            traceback.print_exc()
+            logger.error(f"Unexpected error in processor loop: {e}", exc_info=True)
+
             time.sleep(5)
         # Log empty line
         logger.info("")
 
 
 if __name__ == "__main__":
-    run_processor_loop(1)
+    run_processor_loop(4)
