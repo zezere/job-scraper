@@ -38,7 +38,9 @@ def main() -> None:
     Displays a dashboard for viewing and filtering tech jobs in Europe.
     Includes filters for is_remote, job_level, job_type, and job_function.
     """
-    st.set_page_config(page_title="Tech Jobs in Europe", page_icon="🇪🇺", layout="wide")
+    st.set_page_config(
+        page_title="Tech Jobs in Europe", page_icon="🧑‍💻", layout="wide"
+    )
 
     try:
         # Fetch database URL from secrets (Cloud or local .streamlit/secrets.toml)
@@ -72,17 +74,22 @@ def main() -> None:
         .element-container:has(div[data-testid="stDataFrame"]) {
             padding-right: 0 !important;
         }
+        
+        /* Hide the toolbar (CSV download, search, fullscreen) */
+        [data-testid="stDataFrame"] [data-testid="stElementToolbar"] {
+            display: none;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.title("Tech Jobs in Europe 🇪🇺")
+    st.title("🚧 Tech Jobs in Europe")
 
     col1, col2 = st.columns([4, 1])
     with col1:
         st.markdown(
-            "Power over to you: view all tech jobs in Europe, filter, sort, export"
+            "Experimental work-in-progress project. Contact me on GitHub if you have any questions or suggestions."
         )
     with col2:
         if st.button("Refresh Data", use_container_width=True):
@@ -104,9 +111,17 @@ def main() -> None:
     with st.sidebar:
         st.header("Filters")
 
+        # 1. Title Search (Top priority)
+        title_search = st.text_input(
+            "Job Title", placeholder="e.g. data engineer"
+        ).strip()
+
+        # 2. Location Search
+        location_search = st.text_input("Location", placeholder="e.g. Berlin").strip()
+
         if "is_remote" in df.columns:
             remote_filter = st.selectbox(
-                "Remote Work",
+                "Remote or Not",
                 options=["All", "Remote", "Not Remote"],
                 index=0,
             )
@@ -144,7 +159,7 @@ def main() -> None:
             ]
             if available_job_types:
                 job_type_filter = st.multiselect(
-                    "Job Type",
+                    "Employment Type",
                     options=available_job_types,
                     default=available_job_types,
                 )
@@ -169,6 +184,20 @@ def main() -> None:
             job_function_filter = []
 
     filtered_df = df.copy()
+
+    # Apply Title Search Filter
+    if title_search:
+        # User asked for "text search, exact phrase".
+        # We assume this means the phrase must appear in the title (substring match), case-insensitive.
+        filtered_df = filtered_df[
+            filtered_df["title"].str.contains(title_search, case=False, na=False)
+        ]
+
+    # Apply Location Search Filter
+    if location_search:
+        filtered_df = filtered_df[
+            filtered_df["location"].str.contains(location_search, case=False, na=False)
+        ]
 
     if "is_remote" in df.columns and remote_filter != "All":
         if remote_filter == "Remote":
@@ -198,7 +227,7 @@ def main() -> None:
         "job_function",
         "description",
         "company_url",
-        # "date_posted", - comes as null, TODO: find out why
+        # "date_posted", - comes as null most of the time, TODO: find out why
         "job_url",
         "job_url_direct",
     ]
