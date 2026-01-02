@@ -5,7 +5,7 @@ from db_connection import get_connection
 from utils import validate_query_result
 
 
-def get_processed_jobs() -> Optional[pd.DataFrame]:
+def get_processed_jobs(db_url: str) -> Optional[pd.DataFrame]:
     """
     Fetches all jobs from processedjobs table.
 
@@ -13,7 +13,7 @@ def get_processed_jobs() -> Optional[pd.DataFrame]:
         DataFrame with all processed jobs, or None if error
     """
     try:
-        with get_connection() as (conn, cursor):
+        with get_connection(db_url=db_url) as (conn, cursor):
             query = "SELECT * FROM public.processedjobs ORDER BY seen_first_at DESC"
             cursor.execute(query)
             rows = cursor.fetchall()
@@ -39,6 +39,16 @@ def main() -> None:
     Includes filters for is_remote, job_level, job_type, and job_function.
     """
     st.set_page_config(page_title="Tech Jobs in Europe", page_icon="🇪🇺", layout="wide")
+
+    try:
+        # Fetch database URL from secrets (Cloud or local .streamlit/secrets.toml)
+        db_url = st.secrets["DATABASE_URL"]
+    except Exception:
+        st.error(
+            "Missing database configuration. Please ensure specific secrets are set."
+        )
+        st.stop()
+        return
 
     st.markdown(
         """
@@ -78,7 +88,7 @@ def main() -> None:
         if st.button("Refresh Data", use_container_width=True):
             st.cache_data.clear()
 
-    df = get_processed_jobs()
+    df = get_processed_jobs(db_url)
 
     if df is None:
         st.error("Failed to load data. Please check the database connection.")
@@ -86,6 +96,9 @@ def main() -> None:
 
     if df.empty:
         st.info("No jobs in the database.")
+        st.info(
+            "Debugging: If you just started, try running the scraper first to populate data."
+        )
         return
 
     with st.sidebar:

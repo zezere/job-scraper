@@ -2,34 +2,31 @@ from contextlib import contextmanager
 from typing import Tuple
 import psycopg2
 from psycopg2.extensions import connection, cursor
-from config import DATABASE_URL
-
-
 @contextmanager
-def get_connection() -> Tuple[connection, cursor]:
+def get_connection(db_url: str | None = None) -> Tuple[connection, cursor]:
     """
     Context manager for database connections.
-
-    Creates a connection and cursor, yields them, and automatically
-    closes both when exiting the context (even on errors).
-
-    Usage:
-        with get_connection() as (conn, cursor):
-            cursor.execute("SELECT ...")
-            # Connection and cursor automatically closed here
-
-    Yields:
-        Tuple of (connection, cursor)
-
-    Raises:
-        Any exceptions from psycopg2.connect() will propagate to the caller,
-        allowing the calling function's logger to handle them.
+    
+    Args:
+        db_url: Optional database URL. If None, tries to fetch from config.DATABASE_URL.
     """
     conn = None
     cursor_obj = None
 
+    connection_string = db_url
+    if not connection_string:
+        # Lazy import to avoid circular dependency or forcing config load
+        try:
+            from config import DATABASE_URL
+            connection_string = DATABASE_URL
+        except ImportError:
+            pass
+
+    if not connection_string:
+        raise ValueError("No database URL provided or found in config.")
+
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(connection_string)
         cursor_obj = conn.cursor()
         yield (conn, cursor_obj)
     finally:
@@ -37,4 +34,5 @@ def get_connection() -> Tuple[connection, cursor]:
             cursor_obj.close()
         if conn is not None:
             conn.close()
+
 
