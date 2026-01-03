@@ -14,7 +14,7 @@ High-Level Process:
 2.  **Candidate Finding (SQL Agnostic)**:
     - The `sql_find_candidates` function queries the `jobsli` table for potential matches.
     - It uses a set of loose criteria to find candidates. A record is considered a candidate if:
-        - Exact match on: `id` OR `job_url` OR `description` OR `job_url_direct` OR `emails`.
+        - Exact match on: `id` OR `job_url` OR `description` OR `job_url_direct`.
         - OR Exact match on BOTH: `title` AND `company`.
     - It explicitly requires `created_at` < job's timestamp (or same time with lower `id_primary`) to avoid race conditions and self-matching.
 
@@ -31,6 +31,11 @@ High-Level Process:
         -   Target: Job is copied to `preparedjobs` with status "duplicate: <id_list>".
         -   Source: Job's status in `jobsli` is updated to "duplicate: <id_list>".
         -   Note: There may be other non-duplicate candidates, those are currently IGNORED. TODO: SUBJECT FOR IMPROVEMENT LATER.
+
+    -   **Enrichment ("enrichment: <id_list>")**:
+        -   Condition: No strict duplicates, but candidates found where job supplies data for previously empty candidate fields.
+        -   Target: Job is copied to `preparedjobs` with status "enrichment: <id_list>".
+        -   Source: Job's status in `jobsli` is updated to "enrichment: <id_list>".
 
     -   **Similar ("similar: <id_list>")**:
         -   Condition: Candidates were found by the loose SQL criteria, but NONE of them were exact text-matches.
@@ -117,7 +122,7 @@ def _generate_status_string(label: str, ids: list[str]) -> str:
     return f"{label}: {', '.join(sorted_ids)}"
 
 
-def is_duplicate_job(job_row: pd.Series, candidate_row: pd.Series) -> bool:
+def is_duplicate(job_row: pd.Series, candidate_row: pd.Series) -> bool:
     """
     Checks if a candidate is an exact duplicate of the job.
     Compares all fields except: id_primary, created_at, status.
@@ -132,18 +137,87 @@ def is_duplicate_job(job_row: pd.Series, candidate_row: pd.Series) -> bool:
     ]
 
     for field in common_fields:
-        val1 = get_value(job_row, field)
-        val2 = get_value(candidate_row, field)
+        val_job = get_value(job_row, field)
+        val_cand = get_value(candidate_row, field)
 
         # Treat None and empty string as equal
-        if (val1 is None or val1 == "") and (val2 is None or val2 == ""):
+        if (val_job is None or val_job == "") and (val_cand is None or val_cand == ""):
             continue
 
         # If values differ, it's not a duplicate
-        if val1 != val2:
+        if val_job != val_cand:
             return False
 
     return True
+
+
+def has_enrichment(job_row: pd.Series, candidate_row: pd.Series) -> bool:
+    """
+    Checks if the newer job (`job_row`) has MORE data than the older candidate (`candidate_row`).
+
+    Rules:
+    1. Candidate must be older (older create timestamp, or same timestamp but lower id).
+    2. All common fields must be either:
+       - Exact match.
+       - OR Candidate was empty/null, but Job has data (Enrichment).
+    3. At least one field MUST be an enrichment to return True.
+    4. If any field CONFLICTS (both have data but different), return False.
+    """
+    # 1. Check strict chronological order (Candidate must be OLDER)
+    job_created = get_value(job_row, "created_at")
+    cand_created = get_value(candidate_row, "created_at")
+    job_id = get_value(job_row, "id_primary")
+    cand_id = get_value(candidate_row, "id_primary")
+
+    if not (
+        cand_created < job_created or (cand_created == job_created and cand_id < job_id)
+    ):
+        return False
+
+    excluded_fields = {"id_primary", "created_at", "status"}
+    has_enrichment = False
+
+    # Get all potential fields
+    all_fields = set(job_row.index).union(candidate_row.index)
+
+    for field in all_fields:
+        if field in excluded_fields:
+            continue
+
+        val_job = get_value(job_row, field)
+        val_cand = get_value(candidate_row, field)
+
+        # Normalize for comparison
+        is_job_empty = val_job is None or val_job == ""
+        is_cand_empty = val_cand is None or val_cand == ""
+
+        # Case A: Both empty -> Match
+        if is_job_empty and is_cand_empty:
+            continue
+
+        # Case B: Candidate has data, Job empty -> Loss of data?
+        # Requirement says "fields must be exact match or candidate null".
+        # Logic implies we only care if we are ADDING data, removing data usually means not a strict enrichment match
+        # or just acceptable difference?
+        # User prompt: "Fields matches OR if some fields were null/empty for candidate, now they have data"
+        # Implies: If Candidate has data, Job MUST match it.
+        if not is_cand_empty and is_job_empty:
+            # Job is missing data that candidate has. This is NOT "additional data" scenario primarily,
+            # but strictly speaking doesn't violate "candidate was null".
+            # STRICT interpretation: If candidate has data, job must match.
+            # If job is missing it, it's NOT a match.
+            return False
+
+        # Case C: Candidate empty, Job has data -> ENRICHMENT
+        if is_cand_empty and not is_job_empty:
+            has_enrichment = True
+            continue
+
+        # Case D: Both have data -> Must MATCH
+        if val_job != val_cand:
+            return False
+
+    return has_enrichment
 
 
 def pick_job_for_matching(cursor, id_primary: int | None = None) -> pd.Series | None:
@@ -203,7 +277,6 @@ def sql_find_candidates(
     #    - job_url
     #    - description
     #    - job_url_direct
-    #    - emails
     # 2. if both of the following fields are an exact match (unless NULL or empty), proceed to step 4
     #    - title
     #    - company
@@ -222,7 +295,6 @@ def sql_find_candidates(
     job_url = get_value(job_row, "job_url")
     job_description = get_value(job_row, "description")
     job_url_direct = get_value(job_row, "job_url_direct")
-    job_emails = get_value(job_row, "emails")
     job_title = get_value(job_row, "title")
     job_company = get_value(job_row, "company")
 
@@ -244,9 +316,6 @@ def sql_find_candidates(
     if job_url_direct is not None:
         step1_conditions.append("job_url_direct = %s")
         params.append(job_url_direct)
-    if job_emails is not None:
-        step1_conditions.append("emails = %s")
-        params.append(job_emails)
 
     if step1_conditions:
         conditions.append(" OR ".join(step1_conditions))
@@ -406,15 +475,18 @@ def match_job(id_primary: int | None = None) -> pd.Series:
                 elif assessment == "candidates_found":
                     # Check if any candidate is an exact duplicate
                     duplicate_ids = []
-                    all_candidate_ids = []
+                    enrichment_ids = []
 
+                    all_candidate_ids = []
                     for _, candidate_row in candidates_df.iterrows():
                         cand_id = get_value(candidate_row, "id_primary")
                         if cand_id is not None:
                             all_candidate_ids.append(str(cand_id))
 
-                        if is_duplicate_job(job_row, candidate_row):
+                        if is_duplicate(job_row, candidate_row):
                             duplicate_ids.append(str(cand_id))
+                        elif has_enrichment(job_row, candidate_row):
+                            enrichment_ids.append(str(cand_id))
 
                     if duplicate_ids:
                         # CASE 1: At least one duplicate found
@@ -440,8 +512,34 @@ def match_job(id_primary: int | None = None) -> pd.Series:
                                 exc_info=True,
                             )
 
+                    elif enrichment_ids:
+                        # CASE 2: No duplicates, but enrichment found
+                        status_msg = _generate_status_string(
+                            "enrichment", enrichment_ids
+                        )
+                        logger.info(
+                            f"Job {job_id_primary} found to be enrichment of {enrichment_ids}"
+                        )
+
+                        try:
+                            transfer_job(
+                                cursor=cursor,
+                                job_id=job_id_primary,
+                                source_table="jobsli",
+                                target_table="preparedjobs",
+                                target_status=status_msg,
+                                delete_source=False,
+                                source_status=status_msg,
+                                source_status_on_failure=status_msg,
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to process enrichment job {job_id_primary}: {e}",
+                                exc_info=True,
+                            )
+
                     else:
-                        # CASE 2: No duplicates, but candidates exist -> SIMILAR
+                        # CASE 3: No duplicates or enrichment, but candidates exist -> SIMILAR
                         status_msg = _generate_status_string(
                             "similar", all_candidate_ids
                         )
@@ -541,4 +639,4 @@ def run_matcher_loop(limit: int = 50) -> None:
 
 if __name__ == "__main__":
     # Run the matcher for a few jobs to verify
-    run_matcher_loop()
+    run_matcher_loop(200)

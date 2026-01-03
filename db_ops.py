@@ -1,4 +1,3 @@
-import logging
 import pandas as pd
 from typing import Optional, Any, Tuple, List, Dict
 from db_connection import get_connection
