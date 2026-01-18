@@ -13,5 +13,6 @@ ENV/
 *.sqlite3
 logs/
 planning/
+scrapers/
 
 .streamlit/secrets.toml

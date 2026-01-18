@@ -108,8 +108,8 @@ def save_jobs(jobs_df: pd.DataFrame) -> None:
 
 
 def scrape_linkedin(
-    search_term: str = "ux researcher",
-    location: str = "europe",
+    search_term: str = 'title:("ux research")',  # Try grouping the phrase with parentheses regarding the title operator
+    location: str = "European Union",
     results_wanted: int = SCRAPER_SETTINGS["results_wanted"],
     hours_old: int = SCRAPER_SETTINGS["hours_old"],
     verbose: int = SCRAPER_SETTINGS["verbose"],
@@ -173,4 +173,4 @@ def scrape_linkedin(
 
 
 if __name__ == "__main__":
-    scrape_linkedin(results_wanted=20)
+    scrape_linkedin(results_wanted=5)

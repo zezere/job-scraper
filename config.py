@@ -16,7 +16,7 @@ SCRAPER_INTERVAL = int(os.getenv("SCRAPER_INTERVAL", 3600))
 # Scraper Settings
 SCRAPER_SETTINGS = {
     "results_wanted": int(os.getenv("SCRAPER_RESULTS_WANTED", 5)),
-    "hours_old": int(os.getenv("SCRAPER_HOURS_OLD", 24)),
+    "hours_old": int(os.getenv("SCRAPER_HOURS_OLD", 168)),
     "verbose": int(os.getenv("SCRAPER_VERBOSE", 2)),
     "linkedin_fetch_description": os.getenv("SCRAPER_FETCH_DESCRIPTION", "True").lower()
     == "true",
