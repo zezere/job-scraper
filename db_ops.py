@@ -1,3 +1,10 @@
+"""
+LEGACY MODULE NOTICE:
+This module is considered legacy.
+Future orchestration will be handled by Apache Airflow.
+Refactoring needed to remove dependency on internal locking mechanisms.
+"""
+
 import pandas as pd
 from typing import Optional, Any, Tuple, List, Dict
 from db_connection import get_connection

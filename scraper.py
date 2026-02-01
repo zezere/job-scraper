@@ -1,3 +1,5 @@
+# Scrapes jobs from LinkedIn and saves them to the database.
+
 from typing import Dict, Any
 import time
 import psycopg2
@@ -7,6 +9,7 @@ from db_connection import get_connection
 from db_ops import insert_row
 from utils import setup_logging, get_value, validate_dataframe
 from config import SCRAPER_SETTINGS, SCRAPER_RETRY_ATTEMPTS, SCRAPER_RETRY_DELAY
+import argparse
 
 logger = setup_logging("scraper")
 
@@ -108,7 +111,7 @@ def save_jobs(jobs_df: pd.DataFrame) -> None:
 
 
 def scrape_linkedin(
-    search_term: str = 'title:("ux research")',  # Try grouping the phrase with parentheses regarding the title operator
+    search_term: str = "Data Analyst",  # Try grouping the phrase with parentheses regarding the title operator
     location: str = "European Union",
     results_wanted: int = SCRAPER_SETTINGS["results_wanted"],
     hours_old: int = SCRAPER_SETTINGS["hours_old"],
@@ -173,4 +176,62 @@ def scrape_linkedin(
 
 
 if __name__ == "__main__":
-    scrape_linkedin(results_wanted=5)
+    # Initialize the parser
+    parser = argparse.ArgumentParser(
+        description="Scrape LinkedIn jobs with custom parameters."
+    )
+
+    # Add arguments
+    # The 'type' parameter enforces the data type (str, int)
+    # 'help' provides a description shown when running with --help
+    parser.add_argument(
+        "--search_term",
+        type=str,
+        help="The job title or keywords to search for.",
+        required=True,
+    )
+    parser.add_argument(
+        "--location", type=str, help="The location to search in (e.g., 'Berlin')."
+    )
+    parser.add_argument(
+        "--results_wanted",
+        type=int,
+        help="Number of results to fetch.",
+    )
+    parser.add_argument(
+        "--hours_old",
+        type=int,
+        help="Filter jobs posted within the last N hours.",
+    )
+    parser.add_argument(
+        "--verbose",
+        type=int,
+        help="Verbosity level for scraper logs (0, 1, or 2).",
+    )
+    parser.add_argument(
+        "--linkedin_fetch_description",
+        type=str,
+        help="Set to 'true' or 'false' to override config setting.",
+    )
+
+    # Parse the arguments from the command line
+    args = parser.parse_args()
+
+    # Handle boolean flag conversion manually
+    if args.linkedin_fetch_description is not None:
+        val = args.linkedin_fetch_description.lower()
+        if val in ["true", "1", "yes"]:
+            args.linkedin_fetch_description = True
+        elif val in ["false", "0", "no"]:
+            args.linkedin_fetch_description = False
+        else:
+            parser.error("--linkedin_fetch_description must be 'true' or 'false'")
+
+    # Create a dictionary of arguments that were actually provided (not None)
+    # We use vars(args) to convert the Namespace object to a dictionary
+    # We filter out None values so that the function uses its default values for missing args
+    scrape_kwargs = {k: v for k, v in vars(args).items() if v is not None}
+
+    # Call the main function with the parsed arguments
+    # The ** operator unpacks the dictionary into keyword arguments
+    scrape_linkedin(**scrape_kwargs)
