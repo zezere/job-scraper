@@ -4,7 +4,11 @@ import os
 from datetime import datetime
 
 import pandas as pd
+from dotenv import load_dotenv
 from jobspy import scrape_jobs
+
+# Load environment variables from .env
+load_dotenv()
 
 from utils import setup_logging
 

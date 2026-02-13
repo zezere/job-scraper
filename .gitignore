@@ -14,5 +14,6 @@ ENV/
 logs/
 planning/
 scrapers/
+pipeline/
 
 .streamlit/secrets.toml
