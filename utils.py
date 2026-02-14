@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 from datetime import datetime
 from typing import Optional, Any, List
 import pandas as pd
@@ -36,8 +37,8 @@ def setup_logging(log_name: str = "app", log_dir: str = "logs") -> logging.Logge
     )
     file_handler.setFormatter(formatter)
 
-    # Stream Handler (Console)
-    stream_handler = logging.StreamHandler()
+    # Stream Handler (Console) -> stdout instead of stderr default
+    stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
 
     # Add handlers

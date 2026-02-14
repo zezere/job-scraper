@@ -1,19 +1,32 @@
 import argparse
+import logging
 import json
 import os
+import sys
 from datetime import datetime
+from utils import setup_logging
 
 import pandas as pd
+import boto3
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from jobspy import scrape_jobs
 
 # Load environment variables from .env
 load_dotenv()
 
-from utils import setup_logging
-
-# Use shared logging setup
+# Use shared logging setup - initialized later with verbose arg
 logger = setup_logging("scrapetojson")
+
+
+def upload_to_s3(content: str, bucket: str, key: str) -> bool:
+    try:
+        s3_client = boto3.client("s3")
+        s3_client.put_object(Bucket=bucket, Key=key, Body=content)
+        return True
+    except Exception as e:
+        logger.error(f"S3 Upload Error: {e}")
+        return False
 
 
 def run_scraper(
@@ -25,6 +38,7 @@ def run_scraper(
     hours_old: int,
     linkedin_fetch_description: bool,
     verbose: int,
+    output_to_s3: bool = False,
 ):
     # Construct filename: prefix_timestamp_ms.json
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
@@ -41,6 +55,7 @@ def run_scraper(
         "output_file": output_file,
         "linkedin_fetch_description": linkedin_fetch_description,
         "verbose": verbose,
+        "output_to_s3": output_to_s3,
     }
     logger.info(f"Starting scrape with parameters: {json.dumps(params, default=str)}")
 
@@ -58,13 +73,34 @@ def run_scraper(
         logger.info(f"Scrape complete. Found {len(jobs)} jobs.")
 
         if len(jobs) > 0:
-            # Ensure output directory exists
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
+            json_str = jobs.to_json(orient="records", date_format="iso", indent=2)
+            upload_success = False
 
-            # Save to JSON - orient='records' creates a list of dicts, dates as ISO string
-            jobs.to_json(output_file, orient="records", date_format="iso", indent=2)
-            logger.info(f"Successfully saved results to {output_file}")
+            if output_to_s3:
+                bucket_name = os.getenv("AWS_S3_BUCKET_NAME")
+                if not bucket_name:
+                    logger.error(
+                        "AWS_S3_BUCKET_NAME not found in environment variables."
+                    )
+                else:
+                    logger.info(f"Attempting upload to S3 bucket: {bucket_name}")
+                    if upload_to_s3(json_str, bucket_name, filename):
+                        logger.info(
+                            f"Successfully uploaded to S3: s3://{bucket_name}/{filename}"
+                        )
+                        upload_success = True
+                    else:
+                        logger.warning("S3 upload failed. Falling back to local save.")
+
+            if not upload_success:
+                # Ensure output directory exists
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+
+                # Save to JSON locally
+                with open(output_file, "w") as f:
+                    f.write(json_str)
+                logger.info(f"Successfully saved results to {output_file}")
         else:
             logger.warning("No jobs found with the given criteria.")
 
@@ -101,8 +137,25 @@ if __name__ == "__main__":
         default=2,
         help="Verbosity level for scraper logs (0, 1, or 2).",
     )
+    parser.add_argument(
+        "--output_to_s3",
+        action="store_true",
+        help="Upload results to S3 bucket defined in AWS_S3_BUCKET_NAME",
+    )
 
     args = parser.parse_args()
+
+    level = logging.DEBUG if args.verbose > 1 else logging.INFO
+    logger.setLevel(level)
+
+    # Configure root logger to output to stdout (for third-party libs like JobSpy)
+    # My own logger is set to not propagate, so it won't double-log
+    logging.basicConfig(
+        stream=sys.stdout,
+        level=level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        force=True,  # Override any existing config
+    )
 
     fetch_desc = args.linkedin_fetch_description.lower() in ["true", "1", "yes"]
 
@@ -115,4 +168,5 @@ if __name__ == "__main__":
         hours_old=args.hours_old,
         linkedin_fetch_description=fetch_desc,
         verbose=args.verbose,
+        output_to_s3=args.output_to_s3,
     )
