@@ -2,11 +2,13 @@ from contextlib import contextmanager
 from typing import Tuple
 import psycopg2
 from psycopg2.extensions import connection, cursor
+
+
 @contextmanager
 def get_connection(db_url: str | None = None) -> Tuple[connection, cursor]:
     """
     Context manager for database connections.
-    
+
     Args:
         db_url: Optional database URL. If None, tries to fetch from config.DATABASE_URL.
     """
@@ -18,6 +20,7 @@ def get_connection(db_url: str | None = None) -> Tuple[connection, cursor]:
         # Lazy import to avoid circular dependency or forcing config load
         try:
             from config import DATABASE_URL
+
             connection_string = DATABASE_URL
         except ImportError:
             pass
@@ -34,5 +37,3 @@ def get_connection(db_url: str | None = None) -> Tuple[connection, cursor]:
             cursor_obj.close()
         if conn is not None:
             conn.close()
-
-

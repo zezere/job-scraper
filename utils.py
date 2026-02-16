@@ -33,7 +33,9 @@ def setup_logging(log_name: str = "app", log_dir: str = "logs") -> logging.Logge
     # File Handler - strict separation by log_name
     log_filename = os.path.join(log_dir, f"{log_name}.log")
     file_handler = RotatingFileHandler(
-        log_filename, maxBytes=5 * 1024 * 1024, backupCount=5  # 5MB props
+        log_filename,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,  # 5MB props
     )
     file_handler.setFormatter(formatter)
 

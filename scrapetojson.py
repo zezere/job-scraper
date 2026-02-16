@@ -2,7 +2,6 @@ import argparse
 import logging
 import json
 import os
-import sys
 from datetime import datetime
 from utils import setup_logging
 
@@ -148,14 +147,11 @@ if __name__ == "__main__":
     level = logging.DEBUG if args.verbose > 1 else logging.INFO
     logger.setLevel(level)
 
-    # Configure root logger to output to stdout (for third-party libs like JobSpy)
-    # My own logger is set to not propagate, so it won't double-log
-    logging.basicConfig(
-        stream=sys.stdout,
-        level=level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        force=True,  # Override any existing config
-    )
+    # Silence third-party logs (JobSpy, urllib3, boto3) -> ERROR only
+    logging.getLogger("JobSpy").setLevel(logging.ERROR)
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
+    logging.getLogger("boto3").setLevel(logging.ERROR)
+    logging.getLogger("botocore").setLevel(logging.ERROR)
 
     fetch_desc = args.linkedin_fetch_description.lower() in ["true", "1", "yes"]
 
