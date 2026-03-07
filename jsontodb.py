@@ -32,6 +32,7 @@ TABLE_COLUMNS = [
     "company_url",
     "company_logo",
     "company_url_direct",
+    "scraped_on",
 ]
 
 # Use shared logging setup
