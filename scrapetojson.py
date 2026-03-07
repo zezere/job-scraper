@@ -2,12 +2,11 @@ import argparse
 import logging
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from utils import setup_logging
 
 import pandas as pd
 import boto3
-from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from jobspy import scrape_jobs
 
@@ -72,6 +71,7 @@ def run_scraper(
         logger.info(f"Scrape complete. Found {len(jobs)} jobs.")
 
         if len(jobs) > 0:
+            jobs["scraped_on"] = datetime.now(timezone.utc).date().isoformat()
             json_str = jobs.to_json(orient="records", date_format="iso", indent=2)
             upload_success = False
 
