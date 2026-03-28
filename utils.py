@@ -71,6 +71,11 @@ def get_value(row: pd.Series, key: str) -> Optional[Any]:
     """
     val = row.get(key)
 
+    # Lists/arrays (e.g. Postgres array columns) are never NA — skip pd.isna
+    # which would return a boolean array and make `if pd.isna(val)` ambiguous.
+    if isinstance(val, (list, tuple)):
+        return val  # return as-is; emptiness checked separately by callers
+
     if pd.isna(val):
         return None
 

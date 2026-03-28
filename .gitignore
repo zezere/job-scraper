@@ -15,5 +15,6 @@ logs/
 planning/
 scrapers/
 pipeline/
+learningpydantic/
 
 .streamlit/secrets.toml

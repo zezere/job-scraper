@@ -7,7 +7,7 @@ High-Level Process:
 1.  **Job Selection**:
     - The `pick_job_for_matching` function selects a single job from the `jobsli` table.
     - If a specific `id_primary` is provided, it attempts to load that exact job.
-    - If not, it selects the oldest job (`created_at ASC`) that hasn't been processed yet (status is NULL or empty).
+    - If not, it selects the oldest job (`scraped_on ASC`) that hasn't been processed yet (status is NULL or empty).
     - It uses `id_primary ASC` as a tie-breaker for jobs with the same timestamp.
     - The selected job is temporarily marked with status "worker_1" to prevent other workers (if concurrent) from picking it up.
 
@@ -235,7 +235,7 @@ def pick_job_for_matching(cursor, id_primary: int | None = None) -> pd.Series | 
     else:
         logger.debug("Selecting oldest row with null/empty status")
         conditions = "status IS NULL OR status = ''"
-        order_by = "created_at ASC, id_primary ASC"
+        order_by = "scraped_on::date ASC, id_primary ASC"
 
     return fetch_and_lock_job(
         cursor=cursor,
